@@ -1,0 +1,439 @@
+---
+title: "Assignment 2"
+author: "Zhengyang Fei"
+date: "2025-03-15"
+output: pdf_document
+---
+
+# Load in Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(glmnet)
+library(pROC)
+library(randomForest)
+library(gbm)
+library(webshot2)
+library(ggplot2)
+library(kableExtra)
+library(caret) 
+library(gridExtra)
+library(patchwork)
+library(pdp)
+library(corrplot)
+```
+
+# Cleaning Data
+```{r}
+df <- read.csv("cleveland.txt")
+colnames(df) <- c('age', 'sex', 'cp', 'trestbps', 'chol', 'fbs', 'restecg',
+                  'thalach', 'exang', 'oldpeak', 'slope', 'ca', 'thal', 'num')
+df <- df %>%
+  mutate(
+    sex = as.factor(sex),
+    cp = as.factor(cp),
+    fbs = as.factor(fbs),
+    restecg = as.factor(restecg),
+    exang = as.factor(exang),
+    slope = as.factor(slope),
+    ca = as.factor(ca),
+    thal = as.factor(thal),
+    num = as.factor(ifelse(num > 0, 1, 0))  
+  )
+```
+
+# Part (a)
+## Validation process for the models
+```{r}
+# Initialize a results dataframe
+results <- data.frame(
+  Iteration = rep(1:5, each = 3),
+  Model = rep(c("Logistic Regression", "Random Forest", "Gradient Boosting"), times = 5),
+  AUC = NA,
+  Accuracy = NA,
+  Sensitivity = NA,
+  Specificity = NA,
+  Brier_Score = NA
+)
+
+lambdas <- numeric(5)
+roc_list <- list()
+
+# Repeat 5 times
+for (i in 1:5) {
+  set.seed(2025 + i)  
+
+  trainIndex <- createDataPartition(df$num, p = 0.7, list = FALSE)
+  train <- df[trainIndex, ]
+  test <- df[-trainIndex, ]
+
+  train$num <- as.numeric(as.character(train$num))
+  test$num <- as.numeric(as.character(test$num))
+
+  #### LOGISTIC REGRESSION (LASSO) ####
+  X_train <- model.matrix(num ~ . -1, data = train) 
+  X_test <- model.matrix(num ~ . -1, data = test)
+  
+  y_train <- train$num
+  y_test <- test$num
+
+  cv_model <- cv.glmnet(X_train, y_train, family = "binomial", alpha = 1, nfolds = 100)
+  best_lambda <- cv_model$lambda.min
+  lambdas[i] <- best_lambda  
+  final_model <- glmnet(X_train, y_train, family = "binomial", alpha = 1, lambda = best_lambda)
+  
+  pred_probs <- predict(final_model, newx = X_test, type = "response")
+  pred_classes <- ifelse(pred_probs > 0.5, 1, 0)
+  
+  acc <- mean(pred_classes == y_test)
+  roc_curve <- roc(y_test, as.numeric(pred_probs))
+  auc_value <- auc(roc_curve)
+  
+  conf_matrix <- confusionMatrix(factor(pred_classes), factor(y_test))
+  sens_value <- conf_matrix$byClass["Sensitivity"]
+  spec_value <- conf_matrix$byClass["Specificity"]
+  
+  brier_score <- mean((pred_probs - y_test)^2)
+
+  results$AUC[results$Iteration == i & results$Model == "Logistic Regression"] <- auc_value
+  results$Accuracy[results$Iteration == i & results$Model == "Logistic Regression"] <- acc
+  results$Sensitivity[results$Iteration == i & results$Model == "Logistic Regression"] <- sens_value
+  results$Specificity[results$Iteration == i & results$Model == "Logistic Regression"] <- spec_value
+  results$Brier_Score[results$Iteration == i & results$Model == "Logistic Regression"] <- brier_score
+
+  #### RANDOM FOREST ####
+  train$num <- as.factor(train$num)
+  test$num <- as.factor(test$num)
+  
+  tune_grid_rf <- expand.grid(mtry = c(3, 5, 7))
+  rf_model <- train(num ~ ., data = train, method = "rf",
+                    tuneGrid = tune_grid_rf,
+                    trControl = trainControl(method = "cv", number = 100),
+                    ntree = 500)
+  
+  best_rf_model <- rf_model$finalModel
+  
+  rf_pred_probs <- predict(rf_model, newdata = test, type = "prob")[,2]
+  rf_pred_classes <- predict(rf_model, newdata = test, type = "raw")
+  
+  rf_acc <- mean(rf_pred_classes == test$num)
+  rf_roc_curve <- roc(test$num, rf_pred_probs, levels = c(0,1), direction = "<")
+  rf_auc_value <- auc(rf_roc_curve)
+  
+  rf_conf_matrix <- confusionMatrix(factor(rf_pred_classes), factor(test$num))
+  rf_sens_value <- rf_conf_matrix$byClass["Sensitivity"]
+  rf_spec_value <- rf_conf_matrix$byClass["Specificity"]
+  
+  rf_brier_score <- mean((rf_pred_probs - as.numeric(test$num))^2)
+
+  results$AUC[results$Iteration == i & results$Model == "Random Forest"] <- rf_auc_value
+  results$Accuracy[results$Iteration == i & results$Model == "Random Forest"] <- rf_acc
+  results$Sensitivity[results$Iteration == i & results$Model == "Random Forest"] <- rf_sens_value
+  results$Specificity[results$Iteration == i & results$Model == "Random Forest"] <- rf_spec_value
+  results$Brier_Score[results$Iteration == i & results$Model == "Random Forest"] <- rf_brier_score
+  
+  #### GRADIENT BOOSTING ####
+  train$num <- as.numeric(as.character(train$num))
+  test$num <- as.numeric(as.character(test$num))
+  
+  gbm_model <- gbm(num ~ ., 
+                   data = train, 
+                   distribution = "bernoulli",  
+                   n.trees = 5000, 
+                   interaction.depth = 3,  
+                   shrinkage = 0.01,  
+                   cv.folds = 100,  
+                   verbose = FALSE)
+
+  best_trees <- gbm.perf(gbm_model, method = "cv", plot.it = FALSE)
+  gbm_pred_probs <- predict(gbm_model, newdata = test, n.trees = best_trees, type = "response")
+  gbm_pred_classes <- ifelse(gbm_pred_probs > 0.5, 1, 0)  
+
+  gbm_acc <- mean(gbm_pred_classes == test$num)
+  gbm_roc_curve <- roc(test$num, gbm_pred_probs)
+  gbm_auc_value <- auc(gbm_roc_curve)
+
+  gbm_conf_matrix <- confusionMatrix(factor(gbm_pred_classes), factor(test$num))
+  gbm_sens_value <- gbm_conf_matrix$byClass["Sensitivity"]
+  gbm_spec_value <- gbm_conf_matrix$byClass["Specificity"]
+  
+  gbm_brier_score <- mean((gbm_pred_probs - as.numeric(test$num))^2)
+
+  results$AUC[results$Iteration == i & results$Model == "Gradient Boosting"] <- gbm_auc_value
+  results$Accuracy[results$Iteration == i & results$Model == "Gradient Boosting"] <- gbm_acc
+  results$Sensitivity[results$Iteration == i & results$Model == "Gradient Boosting"] <- gbm_sens_value
+  results$Specificity[results$Iteration == i & results$Model == "Gradient Boosting"] <- gbm_spec_value
+  results$Brier_Score[results$Iteration == i & results$Model == "Gradient Boosting"] <- gbm_brier_score
+}
+
+# Create a dataframe for lambda values
+lambda_df <- data.frame(Iteration = 1:5, Lambda = lambdas)
+
+# Plot AUC values
+p1 <- ggplot(results, aes(x = Model, y = AUC, fill = Model)) +
+  geom_boxplot() +
+  theme_minimal() +
+  ggtitle("AUC Comparison Across 5 Runs") +
+  scale_fill_manual(values = c("steelblue", "lightcoral", "mediumseagreen"))
+
+# Plot Lambda values
+p2 <- ggplot(lambda_df, aes(x = as.factor(Iteration), y = Lambda)) +
+  geom_bar(stat = "identity", fill = "orange") +
+  theme_minimal() +
+  ggtitle("Lambda Values Across Iterations") +
+  xlab("Iteration") +
+  ylab("Lambda (Regularization Parameter)")
+
+# Combine both plots
+grid.arrange(p1, p2, ncol = 2)
+
+# Print summary statistics
+summary_results <- results %>%
+  group_by(Model) %>%
+  summarise(Mean_AUC = mean(AUC, na.rm = TRUE),
+            SD_AUC = sd(AUC, na.rm = TRUE))
+
+print(summary_results)
+print(lambda_df)
+
+
+
+
+
+
+
+summary_results <- results %>%
+  group_by(Model) %>%
+  summarise(
+    Mean_AUC = mean(AUC, na.rm = TRUE),
+    SD_AUC = sd(AUC, na.rm = TRUE),
+    Mean_Accuracy = mean(Accuracy, na.rm = TRUE),
+    SD_Accuracy = sd(Accuracy, na.rm = TRUE),
+    Mean_Sensitivity = mean(Sensitivity, na.rm = TRUE),
+    SD_Sensitivity = sd(Sensitivity, na.rm = TRUE),
+    Mean_Specificity = mean(Specificity, na.rm = TRUE),
+    SD_Specificity = sd(Specificity, na.rm = TRUE),
+    Mean_Brier_Score = mean(Brier_Score, na.rm = TRUE),
+    SD_Brier_Score = sd(Brier_Score, na.rm = TRUE)
+  )
+
+p1 <- ggplot(results, aes(x = Model, y = AUC, fill = Model)) +
+  geom_boxplot() +
+  theme_minimal() +
+  ggtitle("AUC Comparison Across 5 Runs") +
+  scale_fill_manual(values=c("steelblue", "lightcoral", "mediumseagreen"))
+
+p2 <- ggplot(results, aes(x = Model, y = Accuracy, fill = Model)) +
+  geom_boxplot() +
+  theme_minimal() +
+  ggtitle("Accuracy Comparison Across 5 Runs") +
+  scale_fill_manual(values=c("steelblue", "lightcoral", "mediumseagreen"))
+
+p3 <- ggplot(results, aes(x = Model, y = Sensitivity, fill = Model)) +
+  geom_boxplot() +
+  theme_minimal() +
+  ggtitle("Sensitivity Comparison Across 5 Runs") +
+  scale_fill_manual(values=c("steelblue", "lightcoral", "mediumseagreen"))
+
+p4 <- ggplot(results, aes(x = Model, y = Specificity, fill = Model)) +
+  geom_boxplot() +
+  theme_minimal() +
+  ggtitle("Specificity Comparison Across 5 Runs") +
+  scale_fill_manual(values=c("steelblue", "lightcoral", "mediumseagreen"))
+
+p5 <- ggplot(results, aes(x = Model, y = Brier_Score, fill = Model)) +
+  geom_boxplot() +
+  theme_minimal() +
+  ggtitle("Brier Score Comparison Across 5 Runs") +
+  scale_fill_manual(values = c("steelblue", "lightcoral", "mediumseagreen"))
+
+grid.arrange(p1, p2, p3, p4, p5, ncol = 2, nrow = 3)
+
+print(summary_results)
+print(lambdas)
+
+```
+
+## Results
+```{r}
+sorted_results <- results %>%
+  arrange(Model)
+
+# Create an HTML table for model performance over 5 iterations
+results.html <- sorted_results %>%
+  select(Iteration, Model, AUC, Accuracy, Sensitivity, Specificity, Brier_Score) %>%
+  kable("html", caption = "Model Performance Over 5 Iterations (Sorted by Model)", align ='c') %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), full_width = FALSE) %>%
+  column_spec(3:7, width = "3cm") %>%  
+  pack_rows(index = c("Gradient Boosting" = 5, "Logistic Regression" = 5, "Random Forest" = 5))
+
+save_kable(results.html, file = 'results.html')
+webshot('results.html', 'results.png')
+
+# Compute summary statistics (Mean ± SD) for each model
+summary_results <- results %>%
+  group_by(Model) %>%
+  summarise(
+    'AUC (Mean ± SD)' = paste0(round(mean(AUC), 3), " ± ", round(sd(AUC), 3)),
+    'Accuracy (Mean ± SD)' = paste0(round(mean(Accuracy), 3), " ± ", round(sd(Accuracy), 3)),
+    'Sensitivity (Mean ± SD)' = paste0(round(mean(Sensitivity), 3), " ± ", round(sd(Sensitivity), 3)),
+    'Specificity (Mean ± SD)' = paste0(round(mean(Specificity), 3), " ± ", round(sd(Specificity), 3)),
+    'Brier Score (Mean ± SD)' = paste0(round(mean(Brier_Score), 3), " ± ", round(sd(Brier_Score), 3))
+  )
+
+# Create an HTML summary table
+summary.html <- summary_results %>%
+  kable("html", caption = "Summary of Model Performance (Mean ± SD)", align = 'c') %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), full_width = FALSE) %>%
+  column_spec(1, bold = TRUE, width = "5cm") %>%  
+  column_spec(2:6, width = "5cm") %>%  
+  row_spec(0, background = "#D3D3D3")
+
+save_kable(summary.html, file = 'summary.html')
+webshot('summary.html', 'summary.png')
+```
+
+```{r}
+hyperparam_table <- data.frame(
+  Model = c("Logistic Regression", "Random Forest", "Gradient Boosting"),
+  Hyperparameter = c("Lambda", "Number of Trees", "Depth & Shrinkage"),
+  Best_Value = c(best_lambda, 500, paste("Depth:", 3, ", Shrinkage:", 0.01))
+)
+
+hyperparam_table %>%
+  kable("html", caption = "Best Hyperparameters for Each Model") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+
+# Feature importance for Gradient Boosting
+gbm_summary.html <- summary(gbm_model) %>%
+  rename(Features = var, Importance = rel.inf) %>%  
+  kable("html", caption = "Feature Importance in Gradient Boosting") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+
+save_kable(gbm_summary.html, file = 'gbm_summary.html')
+webshot('gbm_summary.html', 'gbm_summary.png')
+
+importance_rf <- importance(best_rf_model)
+importance_rf_df <- data.frame(Feature = rownames(importance_rf), Importance = importance_rf[,1])
+
+# Aggregate by variable (group levels of one-hot encoded variables)
+importance_rf_df$Variable <- gsub("\\d+", "", importance_rf_df$Feature)  # Remove numeric suffixes
+importance_agg <- aggregate(Importance ~ Variable, data = importance_rf_df, sum)
+
+
+gbm_summary <- summary(gbm_model) %>% 
+  rename(Features = var, Importance = rel.inf)  
+
+# Now, use the gbm_summary to create the plot
+gbm_plot <- ggplot(gbm_summary, aes(x = reorder(Features, Importance), y = Importance, fill = Importance)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_gradient(low = "steelblue1", high = "steelblue3") +
+  labs(title = "Feature Importance in Gradient Boosting Machine",
+       x = "Features",
+       y = "Importance") +
+  geom_text(aes(label = round(Importance, 2)), hjust = -0.1) + 
+  theme_minimal()
+
+# Plot Aggregated Feature Importance in Random Forest with labels
+rf_plot <- ggplot(importance_agg, aes(x = reorder(Variable, Importance), y = Importance, fill = Importance)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_gradient(low = "skyblue1", high = "skyblue4") +
+  labs(title = "Aggregated Feature Importance in Random Forest", 
+       x = "Variables", 
+       y = "Importance") +
+  geom_text(aes(label = round(Importance, 2)), hjust = -0.1) +  # Add text labels for importance
+  theme_minimal()
+
+# Combine the plots in a 2-row (vertical) layout
+combined_plot <- gbm_plot / rf_plot + plot_layout(ncol = 1)
+
+# Display the combined plot
+print(combined_plot)
+
+
+# # Create an HTML table for feature importance
+# rf_summary_html <- importance_rf_df %>% 
+#   kable("html", caption = "Feature Importance in Random Forest") %>% 
+#   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+
+```
+
+
+## PDP Plot and Correlation Plot
+```{r}
+# Select only numeric predictors for correlation analysis
+numeric_vars <- c("thalach", "age", "oldpeak", "chol", "trestbps")
+
+# Compute correlation matrix
+cor_matrix <- cor(train[, numeric_vars], use = "complete.obs")
+
+# Plot correlation matrix
+corrplot(cor_matrix, method = "color", type = "upper", 
+         tl.col = "black", tl.srt = 45, col = colorRampPalette(c("blue", "white", "red"))(200))
+
+# Generate Partial Dependence Plots (PDPs) for numeric variables
+pdp_plots <- lapply(numeric_vars, function(var) {
+  partial_data <- partial(gbm_model, pred.var = var, train = train, n.trees = 5000, plot = FALSE)
+  
+  ggplot(partial_data, aes_string(x = var, y = "yhat")) +
+    geom_line(color = "blue") +
+    labs(title = paste("Partial Dependence Plot for", var), x = var, y = "Predicted Response") +
+    theme_minimal()
+})
+
+# Arrange PDPs in a grid layout (2 columns)
+combined_pdp <- wrap_plots(pdp_plots, ncol = 2)
+print(combined_pdp)
+
+```
+
+
+# Part (b)
+```{r}
+# Load necessary libraries
+library(caret)
+library(gbm)
+library(dplyr)
+library(pROC)
+
+# Convert target variable to binary (presence vs. absence of heart disease)
+train$num <- as.numeric(train$num > 0)  # Convert to 0 (No Disease) and 1 (Disease)
+test$num <- as.numeric(test$num > 0)
+
+
+# Fit a Gradient Boosting Model with selected important features
+gbm_model <- gbm(num ~ thal + ca + cp + thalach + age + oldpeak + chol + trestbps, 
+                 data = train, 
+                 distribution = "bernoulli",  
+                 n.trees = 7000, 
+                 interaction.depth = 3,  
+                 shrinkage = 0.01,  
+                 cv.folds = 5,  
+                 verbose = FALSE)
+
+best_trees <- gbm.perf(gbm_model, method = "cv", plot.it = FALSE)
+gbm_pred_probs <- predict(gbm_model, newdata = test, n.trees = best_trees, type = "response")
+
+gbm_pred_classes <- ifelse(gbm_pred_probs > 0.5, 1, 0)
+
+# Compute performance metrics
+gbm_acc <- mean(gbm_pred_classes == test$num)
+gbm_roc_curve <- roc(test$num, gbm_pred_probs)
+gbm_auc_value <- auc(gbm_roc_curve)
+
+gbm_conf_matrix <- confusionMatrix(factor(gbm_pred_classes), factor(test$num))
+gbm_sens_value <- gbm_conf_matrix$byClass["Sensitivity"]
+gbm_spec_value <- gbm_conf_matrix$byClass["Specificity"]
+
+gbm_brier_score <- mean((gbm_pred_probs - as.numeric(test$num))^2)
+
+print(paste("Gradient Boosting AUC:", round(gbm_auc_value, 4)))
+print(paste("Gradient Boosting Accuracy:", round(gbm_acc, 4)))
+print(paste("Gradient Boosting Sensitivity:", round(gbm_sens_value, 4)))
+print(paste("Gradient Boosting Specificity:", round(gbm_spec_value, 4)))
+print(paste("Gradient Boosting Brier Score:", round(gbm_brier_score, 4)))
+
+```
+
