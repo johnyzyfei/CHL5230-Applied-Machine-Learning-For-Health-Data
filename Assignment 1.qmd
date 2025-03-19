@@ -1,0 +1,250 @@
+---
+title: "Assignment 1"
+author: "Zhengyang Fei"
+format: pdf
+editor: visual
+---
+
+
+------------------------------------------------------------------------
+
+Disclaimer: My report does not follow the format of Intro, Methods, Results, Conclusions
+that is described in the syllabus as stated in the assignment description. In my report and code, 
+I followed the tasks one step at a time and provided step by step commentary, making clear what the final answer is and explaining graphs/tables.  
+
+------------------------------------------------------------------------
+
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# import libraries
+library(tidyverse)
+library(knitr)
+set.seed(123)
+```
+
+# Task 1
+
+First, we import the dataset after setting work directory. Then we call read.csv() to get the dataset. The argument header is set to FALSE to tell R that the first row is not the column names. We proceed by properly naming the column names as described in the description provided. Lastly, we take care of missing values by assigning them NA.
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+df <- read.csv("bc_data.csv", header = F)
+
+colnames(df) <- c("ID", "Outcome", "Time", 
+                   "Radius", "Texture", "Perimeter", "Area", "Smoothness", "Compactness", "Concavity", "Concave", "Symmetry", "Fractal",
+                   "Radius_sd", "Texture_sd", "Perimeter_sd", "Area_sd", "Smoothness_sd", "Compactness_sd", "Concavity_sd", "Concave_sd", "Symmetry_sd", "Fractal_sd",
+                   "Radius_worst", "Texture_worst", "Perimeter_worst", "Area_worst", "Smoothness_worst", "Compactness_worst", "Concavity_worst", "Concave_worst", "Symmetry_worst", "Fractal_worst", "Tumor_Size", "Lymph_Size")
+
+df[df =="?"] = NA
+```
+
+
+# Task 2
+
+The variables that we will work with are the "Mean values of ten real-valued features computed for each cell nucleus", "Tumor size", and "Lymph node status" which are the predictors. The variable "Time" is our outcome variable. 
+
+Additionally, we need to code "Lymph node status" into a categorical variable with three levels: 0, 1-3, 4 or more. This is done by using the cut function which divides the continuous variable into factors/categorical variables by the given levels specified in the task description.
+
+Lastly, we need to create a subset of the original dataset with 198 observations to only contain columns 3-13, columns 34 and 35. These columns correspond to the previously stated variables of interest. Note further that the subdataset only contains rows where the column "Outcome" have the value "R" which indicates recurrence. After doing this, we are left with 47 observations where only one contains a "NA".
+```{r, echo=FALSE, message=FALSE}
+df$Lymph_Size <- as.numeric(df$Lymph_Size)
+df$Lymph_Size <- cut(df$Lymph_Size, 
+                      breaks = c(-Inf, 0, 3, Inf), 
+                      labels = c("0", "1-3", "4+"),
+                      right = TRUE)
+df_sub <- df %>% 
+  filter(Outcome == "R") %>%
+  select(3:13, Tumor_Size, Lymph_Size)
+```
+
+We proceed by giving some appropriate descriptive statistics and tables. First we give a table 1 containing summary statistics for each predictor are provided. Note that Lymph_Size contains one one missing value hence the mean is not reported.
+
+
+```{r, echo=FALSE, include=FALSE}
+summary(df_sub)
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+library(knitr)
+library(kableExtra)
+
+data <- data.frame(
+  Feature = c("Time", "Radius", "Texture", "Perimeter", "Area", "Smoothness",
+              "Compactness", "Concavity", "Concave", "Symmetry", "Fractal",
+              "Tumor_Size", "Lymph_Size"),
+  Min = c(1.00, 12.34, 14.34, 81.15, 477.4, 0.08217, 0.06722, 0.05253, 0.03334, 0.1424, 0.05025, 0.400, "0:12"),
+  `1st Qu.` = c(9.00, 15.81, 19.23, 104.90, 801.0, 0.09415, 0.11345, 0.11155, 0.06807, 0.1722, 0.05638, 2.400, "1:12"),
+  Median = c(16.00, 19.00, 21.49, 123.70, 1104.0, 0.10340, 0.13390, 0.16550, 0.08994, 0.1867, 0.06082, 3.000, "2:22"),
+  Mean = c(25.09, 18.40, 21.78, 121.60, 1089.6, 0.10315, 0.14272, 0.16317, 0.09394, 0.1879, 0.06125, 3.462, "NA's:1"),
+  `3rd Qu.` = c(36.50, 20.29, 24.05, 133.70, 1289.5, 0.11175, 0.16655, 0.21200, 0.10955, 0.1983, 0.06508, 4.000, ""),
+  Max = c(78.00, 27.22, 30.99, 182.10, 2250.0, 0.12150, 0.23630, 0.33680, 0.19130, 0.2356, 0.07451, 10.000, "")
+)
+
+kable(data, caption = "Descriptive Statistics") %>%
+  kable_styling(full_width = FALSE)
+```
+
+\newpage
+From the correlation plot, we observe there exists: 
+
+\begin{itemize}
+  \item a strong positive correlation for Area, Radius, and Perimeter. This makes intuitive sense since, if the radius of a tumor increases, so should the area and perimeter.
+  \item a positive correlation between concavity and compactness. This means tumors that have more compactness also tend to have more concave features.
+  \item a slight negative correlation between Fractal and Area (correspondingly also Radius and Perimeter). This suggests that as Fractal increases, the others decrease slightly.
+\end{itemize}
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+library(corrplot)
+
+# Excluding ID, Time, and Area
+df_corr <- df_sub %>%
+  select(-Time, -Lymph_Size)
+
+corrplot(cor(df_corr), type = "upper", order = "hclust", 
+         tl.col = "black", tl.srt = 45, diag = FALSE)
+
+# Calculate the correlation matrix
+cor_matrix <- cor(df_corr)
+mtext("Figure 2: Correlation Plot", side = 1, line = 7, font = 1, cex = 0.8)
+```
+The prescense of a strong correlations between variables such as Area, Radius, and Perimeter indicate the presence of multicollinearity, which can lead to inflated variance and unstable coefficient estimates. To address this issue, one approach is to apply regularization techniques such as Ridge Regression or Lasso Regression, which help shrink coefficients and mitigate multicollinearity, leading to more stable and reliable predictions.
+
+\newpage
+# Task 3
+
+We will now train a ridge regression model to predict time to occurence (outcome variable) using the 12 selected features as predictors. For the $\lambda$ parameter the default grid of values in the glmnet R function is used. We omitted one row where Lymph_size had a missing value in order to fit the model. The plot below illustrates how the coefficients of the predictors vary across different levels of the regularization parameter $\log(\lambda)$.
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+set.seed(123)
+library(glmnet)
+
+# Remove missing values
+df_ridge <- na.omit(df_sub)
+# Generate the model matrix and response variable
+x <- model.matrix(Time ~., df_ridge)[,-1]
+y <- df_ridge$Time
+
+# Fit the ridge regression model
+ridg.mod <- glmnet(x, y, family = "gaussian", alpha=0)
+
+# Set margins
+op <- par(mar=c(3.5, 3.5, 4.5, 0.5), mgp=c(2,1,0))
+# Plot with title
+plot(ridg.mod, xvar = "lambda")
+title(main = "Ridge Regression Coefficients for different Lambdas", line = 3)
+# Reset margins to default if needed
+#par(op)
+```
+
+We have $\log{\lambda}$ on the x-axis and the coefficient values on the y-axis. Some of the coefficients start with values greater than 200 at $\log{\lambda} = 0$ and decreases towards $0$ as $\lambda$ increases. When $\lambda$ is small, the model has minimal regularization, meaning the coefficients remain large. When $\lambda$ increases, coefficients gradually decrease, eventually approaching zero. In this case, Ridge regression makes the coefficients shrink but never become exactly zero, meaning all variables still contribute but with reduced effect.
+
+\newpage
+# Task 4
+We now perform a 5-five cross-validation to get the optimal $\lambda$ value, which will help us minimize the MSE. The plot shows the MSE against the values of log($\lambda$).
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+set.seed(123)
+cv.rr <- cv.glmnet(x, y, family = "gaussian", alpha = 0, nfolds = 5)
+# Set margins to avoid title overlap
+par(mar = c(5, 4, 4, 2) + 0.1)
+# Plot the cross-validation curve
+plot(cv.rr)
+title("Cross-Validation Curve for Ridge Regression", line = 3)
+```
+
+```{r, echo=FALSE, include=FALSE}
+cv.rr$lambda.min
+coef.min <- coef(cv.rr, s = "lambda.min")
+coef.min
+```
+
+The red dots in the plot is the cross-validated MSE for each value of $\lambda$ and the gray error bars gives the variability across the different folds. The left vertical dash line correspond to $\lambda_\text{min}$, the value that minimizes the MSE. The right dashed line correspond to $\lambda_\text{1se}$, which is the largest $\lambda$ within one standard error of the minimum. Note that $\lambda_\text{min} = 74.05392$ for which we obtain the best predictive performance. The table below reports the coefficients of the predictors for the optimal lambda ($\lambda_\text{min}$) value.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+coef_table <- data.frame(
+  Variable = c("(Intercept)", "Radius", "Texture", "Perimeter", "Area",
+               "Smoothness", "Compactness", "Concavity", "Concave",
+               "Symmetry", "Fractal", "Tumor_Size", "Lymph_Size1", "Lymph_Size2"),
+  `Value of coefficient at lambda.min` = c(21.647315913, -0.394295286, -0.135163172, -0.057522156, -0.002887805,
+                                           111.671388429, -11.403298737, -12.112332567, -28.033828747,
+                                           47.641097845, 173.087782625, -0.159028163, -0.691166885, 0.091584506)
+)
+
+colnames(coef_table) <- c("Coefficient", "Value at lambda.min")
+kable(coef_table, caption = "Coefficients at optimal lambda")
+```
+
+The final coefficients at the optimal lambda ($\lambda_\text{min}$) from the ridge regression model illustrate the contribution of each predictor to the outcome while addressing multicolinearity. Note that most coefficients are small in magnitude, indicating that ridge regression effectively reduces them to mitigate overfitting. However, variables such as Smoothness (111.67), Fractal (173.09), and Symmetry (47.64) retain larger absolute values, indicating they have a stronger association with the response variable. 
+
+# Task 5
+
+We calculate and report the MSE on the whole set of the recurrent group for the model using the optimal lambda value chosen previously. The formula for MSE
+
+$$\frac{1}{n}\sum^n_{i}\left(y_i-\hat{f}(x_i)\right)^2,$$ where $y_i$ is the observed recurrence time and $\hat{f}(x_i)$ is the predicted one. The computed MSE is $400.2527$.
+```{r, echo=FALSE, message=FALSE, include=FALSE}
+mean((y-predict(ridg.mod, newx=x, s= cv.rr$lambda.min))^2)
+```
+
+\newpage
+# Task 6
+
+We now redo tasks 3-5 using the Lasso regression model. Similarly, Lasso regression model is trained for the prediction of time to recurrence (outcome variable) using the other 12 features as predictors. For the $\lambda$ parameter the default grid of values in the glmnet R function is used. Below the plot depicts the coefficients of the predictors for different levels of the regularization parameter log($\lambda$).
+
+```{r, warning=FALSE, echo=FALSE, message=FALSE}
+set.seed(123)
+# sum(is.na(df_sub$Lymph_Size))
+df_lasso <- na.omit(df_sub)
+x_lasso <- model.matrix(Time ~., df_lasso)[,-1]
+y_lasso <- df_lasso$Time
+lasso.mod <- glmnet(x_lasso, y_lasso, family = "gaussian", alpha=1)
+plot(lasso.mod, xvar = "lambda")
+title("Lasso Regression Coefficients for different Lambdas", line = 3)
+```
+The x-axis shows $\log{\lambda}$ and the y-axis again represents the coefficient values. Note that as $\lambda$ increases, coefficients shrinks to $0$, gradually leading to a model with less predictors. Now we will perform a cross validation to identify the optimal $\lambda$ and the resulting features that were not set to zero.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+cv.lasso <- cv.glmnet(x_lasso, y_lasso, family="gaussian",alpha=1, nfolds=5)
+# Set margins to avoid title overlap
+par(mar = c(5, 4, 4, 2) + 0.1)
+# Plot the cross-validation curve
+plot(cv.lasso)
+title("Cross-Validation Curve for Lasso Regression", line = 3)
+```
+The cross-validation plot from cv.glmnet for Lasso Regression illustrates the relationship between the logarithm of the regularization parameter (log($\lambda$)) and the mean squared error (MSE). Similar to the previous plot with Ridge, the red dots represent the cross-validated MSE for each value of $\lambda$, while the gray error bars indicate the variability across different folds. The left vertical dashed line corresponds to $\lambda_\text{min}$, the value that minimizes MSE. We choose $\lambda_\text{min}$ as the resulting coefficients provide the best predictive performance.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+cv.lasso$lambda.min
+coef.min <- coef(cv.lasso, s = "lambda.min")
+coef.min
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+coef_df <- data.frame(
+  Variable = c("Intercept", "Radius", "Smoothness", "Symmetry"),
+  Coefficient = c(54.189931, -1.847190, 44.457887, 3.481176)
+)
+
+colnames(coef_df) <- c("Coefficient", "Value at lambda.min")
+kable(coef_df, caption = "Non-Zero Coefficients at Optimal Lambda for Lasso Regression")
+```
+
+Note that many parameters shrank to $0$ at the optimal $\lambda_{\text{min}}$. Notably, the variables Texture, Perimeter, Area, Compactness, Concavity, Concave, Fractal, Tumor Size, Lymph Size (level 1), and Lymph Size (level 2) are excluded from the model. Also Lymph Size (level 0) is absorbed into the intercept as part of the encoding.
+
+We now calculate and report the MSE on the whole set of the recurrent group for the model using the optimal lambda value. Using the same formula as before in task 5. The computed MSE is 412.5034.
+
+```{r, echo=FALSE, message=FALSE, include=FALSE}
+mean((y_lasso-predict(lasso.mod, newx=x_lasso, s= cv.lasso$lambda.min))^2)
+```
+
+\newpage
+# Task 7
+
+We achieve a smaller MSE value of 400.2527 using Ridge Regression compared to 412.5034 for Lasso Regression. Basing on these values, it seems that Ridge performed slightly better in terms of predictive accuracy on this dataset. However, the difference is not substantial and both models have relatively high MSE values, indicating that there is much room for improvement.
+
+A more rigorous approach to comparing the performance of the two prediction methods is nested cross-validation. This technique consists of an outer loop of cross-validation to assess the generalization performance of each method and an inner loop within each fold of the outer loop to optimize the $\lambda$ parameter.
+
+# Task 8
+Some considerations to account for before using the trained model(s) for predicting the time to recurrence using the values of the predictors are:
+
+\begin{itemize}
+  \item Selection bias: The dataset we have is limited to patients who have already undergone surgery. So the model may not generalize well to patients with different treatment histories or tumor characteristics.
+  \item Small dataset: The number of patients we have in the data is small, which could have limited the ability to train a robust model.
+  \item Including additional features (variables not included in Task 2). Including these features could potentially provide more information about the variability of the cell nuclei, which could improve predictive performance. 
+\end{itemize}
