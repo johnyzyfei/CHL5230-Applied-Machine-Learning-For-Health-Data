@@ -1,0 +1,1223 @@
+---
+title: "Assignment 3"
+author: "Zhengyang Fei"
+format: pdf
+editor: visual
+---
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(reshape2)
+library(ggfortify)
+library(cluster)
+library(gplots)
+```
+
+# Missing Data
+
+First we will delete columns with more than 15% missing data
+```{r}
+data <- read.csv("Data_Cortex_Nuclear.csv")
+
+# str(data)
+# missing_counts <- colSums(is.na(data))
+# sort(missing_counts, decreasing = TRUE)
+
+# Set a threshold: remove proteins with more than 15% missing
+threshold <- 0.15
+n_samples <- nrow(data)
+
+# Keep only columns with less than 15% missing
+cols_to_keep <- which(colSums(is.na(data)) / n_samples <= threshold)
+data_clean <- data[, cols_to_keep]
+
+# View which columns were removed
+setdiff(names(data), names(data_clean))
+
+# Percentage missing for each column in data_clean
+missing_percent_clean <- colSums(is.na(data_clean)) / nrow(data_clean) * 100
+missing_percent_clean <- sort(missing_percent_clean, decreasing = TRUE)
+head(missing_percent_clean, 10)  # top 10 columns with missing data
+
+sum(is.na(data_clean))
+```
+Note that we removed 5 columns: "BAD_N", "BCL2_N", "H3AcK18_N", "EGR1_N" and "H3MeK4_N" which were over 15% in missingness. Now we impute the rest of the missing data.
+
+```{r}
+data_imputed <- data_clean
+
+# Ensure the 'class' column is present 
+if (!"class" %in% names(data_imputed)) {
+  data_imputed$class <- data$class  # add back from original
+}
+
+# Identify protein columns only 
+meta_cols <- c("MouseID", "Genotype", "Treatment", "Behavior", "class")
+protein_cols <- setdiff(names(data_imputed), meta_cols)
+
+# Impute missing values for each protein using mean within the same class
+for (protein in protein_cols) {
+  data_imputed[[protein]] <- ave(
+    data_imputed[[protein]],
+    data_imputed$class,
+    FUN = function(x) {
+      # Replace NA with class-wise mean
+      ifelse(is.na(x), mean(x, na.rm = TRUE), x)
+    }
+  )
+}
+
+# Confirm no missing values remain
+missing_percent_imputed <- colSums(is.na(data_imputed)) / nrow(data_imputed) * 100
+missing_percent_imputed <- sort(missing_percent_imputed, decreasing = TRUE)
+head(missing_percent_imputed, 10)  # top 10 columns with missing data
+sum(is.na(data_imputed))
+```
+
+```{r}
+# Calculate the proportion of each category for the categorical variables
+genotype_proportion <- prop.table(table(data_imputed$Genotype))
+treatment_proportion <- prop.table(table(data_imputed$Treatment))
+behavior_proportion <- prop.table(table(data_imputed$Behavior))
+class_proportion <- prop.table(table(data_imputed$class))
+
+cat("Genotype Proportions:\n")
+print(genotype_proportion)
+
+cat("\nTreatment Proportions:\n")
+print(treatment_proportion)
+
+cat("\nBehavior Proportions:\n")
+print(behavior_proportion)
+
+cat("\nClass Proportions:\n")
+print(class_proportion)
+
+```
+
+
+
+# PCA
+```{r}
+meta_cols <- c("MouseID", "Genotype", "Treatment", "Behavior", "class")
+protein_cols <- setdiff(names(data_imputed), meta_cols)
+
+X <- data_imputed[, protein_cols]
+X_scaled <- scale(X)
+
+# Apply PCA
+pr.out <- prcomp(X_scaled, scale = TRUE, retx = TRUE)
+
+# Proportion of Variance Explained (PVE)
+pr.var <- pr.out$sdev^2  # Variance explained by each PC
+pve <- pr.var / sum(pr.var)  # Proportion of variance explained by each PC
+
+plot(pve, xlab = "Principal Component", ylab = "Proportion of Variance Explained", 
+     ylim = c(0, 1), type = "b", main = "Variance Explained by Each Principal Component")
+
+cumulative_pve <- cumsum(pve)
+plot(cumulative_pve, xlab = "Principal Component", 
+     ylab = "Cumulative Proportion of Variance Explained", 
+     ylim = c(0, 1), type = "b", main = "Cumulative Proportion of Variance Explained")
+
+print(cumulative_pve)
+
+# Biplot for PCA 
+biplot(pr.out, scale = 0, main = "PCA Biplot")
+
+par(mfrow = c(2, 1))  
+
+plot(pve, xlab = "Principal Component", ylab = "Proportion of Variance Explained", 
+     ylim = c(0, 1), type = "b", main = "Variance Explained by Each Principal Component")
+
+cumulative_pve <- cumsum(pve)
+plot(cumulative_pve, xlab = "Principal Component", 
+     ylab = "Cumulative Proportion of Variance Explained", 
+     ylim = c(0, 1), type = "b", main = "Cumulative Proportion Variance Explained")
+
+```
+
+```{r}
+pr.out <- prcomp(X_scaled, scale = TRUE, retx = TRUE)
+
+# Extract the loadings for the first two principal components
+loadings <- pr.out$rotation[, 1:2]
+
+# Get the absolute values of the loadings for better interpretation
+abs_loadings <- abs(loadings)
+
+# Identify the proteins that contribute the most to PC1
+pc1_contributors <- sort(abs_loadings[, 1], decreasing = TRUE)
+top_pc1_proteins <- names(pc1_contributors)[1:10]  # Top 10 proteins contributing to PC1
+
+# Identify the proteins that contribute the most to PC2
+pc2_contributors <- sort(abs_loadings[, 2], decreasing = TRUE)
+top_pc2_proteins <- names(pc2_contributors)[1:10]  # Top 10 proteins contributing to PC2
+
+cat("Top 10 proteins contributing to PC1:\n")
+print(top_pc1_proteins)
+
+cat("\nTop 10 proteins contributing to PC2:\n")
+print(top_pc2_proteins)
+
+```
+
+# K means Clustering
+## Silhouette
+```{r}
+sil_width_kmeans <- c()
+
+# Loop over different numbers of clusters (from 2 to 10)
+for(i in 2:10) {
+  # K-means clustering with i clusters
+  kmres <- kmeans(X_scaled, centers = i)
+  
+  # Calculate silhouette score for K-means
+  si <- silhouette(kmres$cluster, dist(X_scaled))
+  
+  # Store the average silhouette width for K-means
+  sil_width_kmeans[i - 1] <- mean(si[, "sil_width"])
+}
+
+plot(2:10, sil_width_kmeans, xlab = "Number of Clusters", ylab = "Average Silhouette Width", 
+     type = "b", pch = 19, col = "blue", main = "Silhouette Width for K-means Clustering")
+```
+
+## k = 2
+```{r}
+meta_cols <- c("MouseID", "Genotype", "Treatment", "Behavior", "class")
+protein_cols <- setdiff(names(data_imputed), meta_cols)
+
+X <- data_imputed[, protein_cols]
+X_scaled <- scale(X)
+
+set.seed(123)
+
+pca_out <- prcomp(X_scaled)
+
+X_pca_28 <- pca_out$x[, 1:28]
+
+km2 <- kmeans(X_pca_28, centers = 2, nstart = 25)
+
+data_imputed$kmeans2 <- as.factor(km2$cluster)
+
+pca_df <- as.data.frame(pca_out$x[, 1:2])  
+pca_df$Cluster <- data_imputed$kmeans2
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Cluster)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "PCA Colored by K-means Clustering (k=2)",
+       x = "PC1", y = "PC2") +
+  theme_minimal()
+```
+
+
+```{r}
+km2 <- kmeans(X_pca_28, centers = 2, nstart = 25)
+
+si <- silhouette(km2$cluster, dist(X_pca_28))
+
+library(cluster)
+plot(si, col = 1:2, main = "Silhouette Plot for K-means (k=2)")
+
+```
+
+
+
+```{r}
+table(data_imputed$Genotype, data_imputed$kmeans2)
+table(data_imputed$Treatment, data_imputed$kmeans2)
+table(data_imputed$Behavior, data_imputed$kmeans2)
+table(data_imputed$class, data_imputed$kmeans2)
+```
+
+```{r}
+library(ggplot2)
+library(reshape2)
+library(gridExtra)
+
+# Create heatmap for Behavior
+conf_matrix_behavior <- table(data_imputed$Behavior, data_imputed$kmeans2)
+conf_matrix_behavior_melt <- melt(conf_matrix_behavior)
+
+heatmap_behavior <- ggplot(conf_matrix_behavior_melt, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile() +
+  geom_text(aes(label = value), color = "black", size = 4) +  # Add text labels for the frequencies
+  scale_fill_gradient(low = "lightblue", high = "red") +
+  labs(title = "Confusion Matrix Heatmap for Behavior", x = "Predicted Clusters", y = "Actual Categories") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  scale_x_discrete(breaks = c(1, 2), labels = c("1", "2"))
+
+# Create heatmap for Genotype
+conf_matrix_genotype <- table(data_imputed$Genotype, data_imputed$kmeans2)
+conf_matrix_genotype_melt <- melt(conf_matrix_genotype)
+
+heatmap_genotype <- ggplot(conf_matrix_genotype_melt, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile() +
+  geom_text(aes(label = value), color = "black", size = 4) +  # Add text labels for the frequencies
+  scale_fill_gradient(low = "lightblue", high = "red") +
+  labs(title = "Confusion Matrix Heatmap for Genotype", x = "Predicted Clusters", y = "Actual Categories") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  scale_x_discrete(breaks = c(1, 2), labels = c("1", "2"))
+
+# Create heatmap for Treatment
+conf_matrix_treatment <- table(data_imputed$Treatment, data_imputed$kmeans2)
+conf_matrix_treatment_melt <- melt(conf_matrix_treatment)
+
+heatmap_treatment <- ggplot(conf_matrix_treatment_melt, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile() +
+  geom_text(aes(label = value), color = "black", size = 4) +  # Add text labels for the frequencies
+  scale_fill_gradient(low = "lightblue", high = "red") +
+  labs(title = "Confusion Matrix Heatmap for Treatment", x = "Predicted Clusters", y = "Actual Categories") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  scale_x_discrete(breaks = c(1, 2), labels = c("1", "2"))
+
+grid.arrange(heatmap_behavior, heatmap_genotype, heatmap_treatment, ncol = 3)
+
+
+```
+
+```{r}
+pca_out <- prcomp(X_scaled, scale = TRUE, retx = TRUE)
+
+loadings <- pca_out$rotation[, 1:2]  
+
+top_contributors_PC1 <- order(abs(loadings[, 1]), decreasing = TRUE)[1:10]  
+top_contributors_PC2 <- order(abs(loadings[, 2]), decreasing = TRUE)[1:10]  
+
+top_proteins_PC1 <- rownames(loadings)[top_contributors_PC1]
+top_proteins_PC2 <- rownames(loadings)[top_contributors_PC2]
+
+cat("Top Contributing Proteins for PC1:\n")
+print(top_proteins_PC1)
+
+cat("\nTop Contributing Proteins for PC2:\n")
+print(top_proteins_PC2)
+
+top_proteins_PC1 <- rownames(loadings)[top_contributors_PC1]
+top_proteins_PC2 <- rownames(loadings)[top_contributors_PC2]
+
+top_proteins <- data.frame(
+  Protein = c(top_proteins_PC1, top_proteins_PC2),
+  PC = rep(c("PC1", "PC2"), each = 10),
+  Loadings = c(loadings[top_contributors_PC1, 1], loadings[top_contributors_PC2, 2])
+)
+
+library(ggplot2)
+
+ggplot(top_proteins, aes(x = reorder(Protein, Loadings), y = Loadings, fill = PC)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +
+  labs(title = "Top Contributing Proteins for PC1 and PC2",
+       x = "Protein",
+       y = "Loading Value",
+       fill = "Principal Component") +
+  theme_minimal()
+
+
+```
+
+```{r}
+# Calculate Gower distance on the scaled protein expression data
+diss <- daisy(X_scaled, metric = "gower")
+diss.mat <- as.matrix(diss)
+diag(diss.mat) <- NA  
+
+hist(diss.mat[upper.tri(diss.mat)], main = "Histogram of Gower Distance", xlab = "Gower Distance")
+
+# Find pairs with Gower distance less than 0.01 (very close)
+# IJ.close <- which(diss.mat < 0.01, arr.ind = TRUE)
+
+# Display the first pair of very close samples
+# diss.mat[IJ.close[1,1], IJ.close[1,2]]
+# data_imputed[IJ.close[1,], ]
+
+# Display the second pair of very close samples
+# diss.mat[IJ.close[2,1], IJ.close[2,2]]
+# data_imputed[IJ.close[2,], ]
+
+# Continue for more pairs as needed
+
+# Find pairs with Gower distance greater than 0.65 (very dissimilar)
+#IJ.far <- which(diss.mat > 0.65, arr.ind = TRUE)
+
+# Display the first pair of very dissimilar samples
+# diss.mat[IJ.far[1,1], IJ.far[1,2]]
+# data_imputed[IJ.far[1,], ]
+
+# Display the second pair of very dissimilar samples
+# diss.mat[IJ.far[2,1], IJ.far[2,2]]
+# data_imputed[IJ.far[2,], ]
+
+# Continue for more pairs as needed
+# Calculate Gower distance on the scaled data
+diss <- daisy(X_scaled, metric = "gower")
+diss.mat <- as.matrix(diss)
+
+# Set diagonal values to NA to exclude self-comparison
+diag(diss.mat) <- NA
+
+# Calculate the mean Gower's distance by taking the mean of all non-diagonal elements
+mean_gower_distance <- mean(diss.mat, na.rm = TRUE)
+
+# Print the mean Gower's distance
+cat("Mean Gower's Distance:", mean_gower_distance, "\n")
+
+
+```
+
+
+## k = 8
+```{r}
+set.seed(42)
+
+km_out_8_28pcs <- kmeans(X_pca_28, centers = 8, nstart = 20)
+
+data_imputed$kmeans8_28pcs <- as.factor(km_out_8_28pcs$cluster)
+
+pca_df <- as.data.frame(pca_out$x[, 1:2])  
+pca_df$Cluster <- data_imputed$kmeans8_28pcs
+
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Cluster)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "PCA Colored by K-means Clustering (k=8)",
+       x = "PC1", y = "PC2") +
+  theme_minimal()
+
+```
+```{r}
+library(cluster)
+
+silhouette_kmeans_28pcs <- silhouette(km_out_8_28pcs$cluster, dist(X_pca_28))
+
+plot(silhouette_kmeans_28pcs, main = "Silhouette Plot for K-means Clustering (k=8) - Using 28 PCs", col = 1:8, border = NA)
+
+```
+
+```{r}
+table(data_imputed$Genotype, data_imputed$kmeans8)
+table(data_imputed$Treatment, data_imputed$kmeans8)
+table(data_imputed$Behavior, data_imputed$kmeans8)
+table(data_imputed$class, data_imputed$kmeans8)
+```
+
+
+
+
+
+```{r}
+conf_matrix_genotype_8 <- table(data_imputed$Genotype, data_imputed$kmeans8_28pcs)
+
+library(reshape2)
+conf_matrix_genotype_8_melt <- melt(conf_matrix_genotype_8)
+
+library(ggplot2)
+ggplot(conf_matrix_genotype_8_melt, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile() +
+  geom_text(aes(label = value), color = "black", size = 4) +  
+  scale_fill_gradient(low = "lightblue", high = "red") +
+  labs(title = "Confusion Matrix Heatmap for Genotype", x = "Predicted Clusters", y = "Actual Categories") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  
+
+
+
+
+conf_matrix_genotype_8 <- table(data_imputed$Treatment, data_imputed$kmeans8_28pcs)
+
+library(reshape2)
+conf_matrix_genotype_8_melt <- melt(conf_matrix_genotype_8)
+
+library(ggplot2)
+ggplot(conf_matrix_genotype_8_melt, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile() +
+  geom_text(aes(label = value), color = "black", size = 4) + 
+  scale_fill_gradient(low = "lightblue", high = "red") +
+  labs(title = "Confusion Matrix Heatmap for Treatment", x = "Predicted Clusters", y = "Actual Categories") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  
+
+
+
+
+conf_matrix_genotype_8 <- table(data_imputed$Behavior, data_imputed$kmeans8_28pcs)
+
+library(reshape2)
+conf_matrix_genotype_8_melt <- melt(conf_matrix_genotype_8)
+
+library(ggplot2)
+ggplot(conf_matrix_genotype_8_melt, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile() +
+  geom_text(aes(label = value), color = "black", size = 4) +  
+  scale_fill_gradient(low = "lightblue", high = "red") +
+  labs(title = "Confusion Matrix Heatmap for Behavior", x = "Predicted Clusters", y = "Actual Categories") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  
+
+```
+
+
+```{r}
+library(reshape2)
+library(ggplot2)
+library(gridExtra)
+
+conf_matrix_genotype_8 <- table(data_imputed$Genotype, data_imputed$kmeans8_28pcs)
+conf_matrix_genotype_8_melt <- melt(conf_matrix_genotype_8)
+
+plot_genotype <- ggplot(conf_matrix_genotype_8_melt, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile() +
+  geom_text(aes(label = value), color = "black", size = 4) +
+  scale_fill_gradient(low = "lightblue", high = "red") +
+  labs(title = "Confusion Matrix Heatmap for Genotype", x = "Predicted Clusters", y = "Actual Categories") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+conf_matrix_treatment_8 <- table(data_imputed$Treatment, data_imputed$kmeans8_28pcs)
+conf_matrix_treatment_8_melt <- melt(conf_matrix_treatment_8)
+
+plot_treatment <- ggplot(conf_matrix_treatment_8_melt, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile() +
+  geom_text(aes(label = value), color = "black", size = 4) +
+  scale_fill_gradient(low = "lightblue", high = "red") +
+  labs(title = "Confusion Matrix Heatmap for Treatment", x = "Predicted Clusters", y = "Actual Categories") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+conf_matrix_behavior_8 <- table(data_imputed$Behavior, data_imputed$kmeans8_28pcs)
+conf_matrix_behavior_8_melt <- melt(conf_matrix_behavior_8)
+
+plot_behavior <- ggplot(conf_matrix_behavior_8_melt, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile() +
+  geom_text(aes(label = value), color = "black", size = 4) +
+  scale_fill_gradient(low = "lightblue", high = "red") +
+  labs(title = "Confusion Matrix Heatmap for Behavior", x = "Predicted Clusters", y = "Actual Categories") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+grid.arrange(plot_genotype, plot_treatment, plot_behavior, ncol = 1)
+
+```
+
+```{r}
+diss <- daisy(X_pca_28, metric = "gower")
+diss.mat <- as.matrix(diss)
+
+diag(diss.mat) <- NA
+
+hist(diss.mat[upper.tri(diss.mat)], 
+     main = "Histogram of Gower's Distance (k = 8)",
+     xlab = "Gower's Distance", 
+     border = "black")
+
+mean_gower_distance <- mean(diss.mat, na.rm = TRUE)
+
+cat("Mean Gower's Distance for k = 8:", mean_gower_distance, "\n")
+```
+
+
+
+
+
+
+
+### Optional k = 4 (not sure if ill keep)
+```{r}
+protein_cols <- setdiff(names(data_imputed), c("MouseID", "Genotype", "Treatment", "Behavior", "class"))
+
+X <- data_imputed[, protein_cols]
+
+X_numeric <- data.frame(lapply(X, as.numeric))
+
+X_scaled <- scale(X_numeric)
+
+data_imputed$Genotype_Treatment <- paste(data_imputed$Genotype, data_imputed$Treatment, sep = "_")
+
+set.seed(123)
+km_genotype_treatment <- kmeans(X_scaled, centers = 4, nstart = 25)
+
+data_imputed$km_genotype_treatment <- as.factor(km_genotype_treatment$cluster)
+
+pam_genotype_treatment <- pam(X_scaled, k = 4)
+data_imputed$pam_genotype_treatment <- as.factor(pam_genotype_treatment$clustering)
+
+pca_out <- prcomp(X_scaled)
+pca_df <- as.data.frame(pca_out$x[, 1:2])  
+pca_df$Cluster <- data_imputed$km_genotype_treatment
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Cluster)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "PCA Colored by K-means Clustering (Genotype + Treatment)",
+       x = "PC1", y = "PC2") +
+  theme_minimal()
+
+table(data_imputed$Genotype_Treatment, data_imputed$km_genotype_treatment)
+
+```
+
+
+```{r}
+data_imputed$Genotype_Behavior <- paste(data_imputed$Genotype, data_imputed$Behavior, sep = "_")
+
+km_genotype_behavior <- kmeans(X_scaled, centers = 4, nstart = 25)
+
+data_imputed$km_genotype_behavior <- as.factor(km_genotype_behavior$cluster)
+
+pam_genotype_behavior <- pam(X_scaled, k = 4)
+data_imputed$pam_genotype_behavior <- as.factor(pam_genotype_behavior$clustering)
+
+pca_df$Cluster <- data_imputed$km_genotype_behavior
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Cluster)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "PCA Colored by K-means Clustering (Genotype + Behavior)",
+       x = "PC1", y = "PC2") +
+  theme_minimal()
+
+table(data_imputed$Genotype_Behavior, data_imputed$km_genotype_behavior)
+
+```
+
+
+```{r}
+data_imputed$Treatment_Behavior <- paste(data_imputed$Treatment, data_imputed$Behavior, sep = "_")
+
+km_treatment_behavior <- kmeans(X_scaled, centers = 4, nstart = 25)
+
+data_imputed$km_treatment_behavior <- as.factor(km_treatment_behavior$cluster)
+
+pam_treatment_behavior <- pam(X_scaled, k = 4)
+data_imputed$pam_treatment_behavior <- as.factor(pam_treatment_behavior$clustering)
+
+pca_df$Cluster <- data_imputed$km_treatment_behavior
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Cluster)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "PCA Colored by K-means Clustering (Treatment + Behavior)",
+       x = "PC1", y = "PC2") +
+  theme_minimal()
+
+table(data_imputed$Treatment_Behavior, data_imputed$km_treatment_behavior)
+
+```
+
+
+## Hierarchical
+### Euclidean 
+```{r}
+library(cluster)
+
+dist_matrix <- dist(X_scaled)
+
+hc_complete <- hclust(dist_matrix, method = "complete")
+
+sil_width_hc <- c()
+for (k in 2:10) {
+  clusters <- cutree(hc_complete, k = k)
+  si <- silhouette(clusters, dist_matrix)
+  sil_width_hc[k - 1] <- mean(si[, "sil_width"])
+}
+
+plot(2:10, sil_width_hc, xlab = "Number of Clusters", ylab = "Average Silhouette Width",
+     type = "b", pch = 19, col = "blue", main = "Silhouette Width for Hierarchical Clustering")
+
+```
+
+
+```{r}
+pca_res <- prcomp(X_scaled)
+X_pca_28 <- pca_res$x[, 1:28]  
+
+data_dist <- dist(X_pca_28)
+
+par(mfrow = c(3, 1), mar = c(2.1, 4.1, 4.1, 2.1))
+
+plot(hclust(data_dist, method = "complete"),
+     labels = FALSE,
+     main = "Complete Linkage",
+     xlab = "", sub = "", ylab = "")
+
+plot(hclust(data_dist, method = "average"),
+     labels = FALSE,
+     main = "Average Linkage",
+     xlab = "", sub = "", ylab = "")
+
+plot(hclust(data_dist, method = "single"),
+     labels = FALSE,
+     main = "Single Linkage",
+     xlab = "", sub = "", ylab = "")
+
+hc_complete <- hclust(data_dist, method = "complete")
+hc_avg <- hclust(data_dist, method = "average")
+hc_single <- hclust(data_dist, method = "single")
+
+cut_complete <- cutree(hc_complete, k = 8)
+cut_average  <- cutree(hc_avg, k = 8)
+cut_single   <- cutree(hc_single, k = 8)
+
+data_imputed$hc_complete <- as.factor(cut_complete)
+data_imputed$hc_average  <- as.factor(cut_average)
+data_imputed$hc_single   <- as.factor(cut_single)
+
+table(data_imputed$class, data_imputed$hc_complete)
+table(data_imputed$class, data_imputed$hc_average)
+table(data_imputed$class, data_imputed$hc_single)
+
+pca_df <- as.data.frame(pca_res$x)
+
+pca_df$Complete <- data_imputed$hc_complete
+pca_df$Average  <- data_imputed$hc_average
+pca_df$Single   <- data_imputed$hc_single
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Complete)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "Hierarchical Clustering (Complete Linkage, k=8)",
+       x = "PC1", y = "PC2") +
+  theme_minimal()
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Average)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "Hierarchical Clustering (Average Linkage, k=8)",
+       x = "PC1", y = "PC2") +
+  theme_minimal()
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Single)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "Hierarchical Clustering (Single Linkage, k=8)",
+       x = "PC1", y = "PC2") +
+  theme_minimal()
+
+```
+```{r}
+pca_df_long <- reshape(pca_df, 
+                       varying = c("Complete", "Average", "Single"), 
+                       v.names = "Cluster", 
+                       timevar = "Linkage", 
+                       times = c("Complete", "Average", "Single"), 
+                       direction = "long")
+
+
+ggplot(pca_df_long, aes(x = PC1, y = PC2, color = Cluster)) +
+  geom_point(alpha = 0.7) +
+  facet_wrap(~ Linkage) +  
+  labs(title = "PCA Colored by Hierarchical Clustering",
+       x = "PC1", y = "PC2") +
+  theme_minimal()
+
+```
+
+
+```{r}
+silhouette_complete <- silhouette(cut_complete, dist(X_pca_28))  # Complete linkage
+silhouette_average <- silhouette(cut_average, dist(X_pca_28))    # Average linkage
+silhouette_single <- silhouette(cut_single, dist(X_pca_28))      # Single linkage
+
+plot(silhouette_complete, main = "Silhouette for Complete Linkage")
+plot(silhouette_average, main = "Silhouette for Average Linkage")
+plot(silhouette_single, main = "Silhouette for Single Linkage")
+
+avg_sil_width_complete <- mean(silhouette_complete[, "sil_width"])
+avg_sil_width_average <- mean(silhouette_average[, "sil_width"])
+avg_sil_width_single <- mean(silhouette_single[, "sil_width"])
+
+cat("Average Silhouette Width for Complete Linkage: ", avg_sil_width_complete, "\n")
+cat("Average Silhouette Width for Average Linkage: ", avg_sil_width_average, "\n")
+cat("Average Silhouette Width for Single Linkage: ", avg_sil_width_single, "\n")
+```
+
+```{r}
+# Cross-tabulation with biological class labels for each linkage method
+
+# Complete Linkage vs Class
+table_complete <- table(data_imputed$class, data_imputed$hc_complete)
+cat("Complete Linkage Cluster Table:\n")
+print(table_complete)
+
+# Average Linkage vs Class
+table_average <- table(data_imputed$class, data_imputed$hc_average)
+cat("Average Linkage Cluster Table:\n")
+print(table_average)
+
+# Single Linkage vs Class
+table_single <- table(data_imputed$class, data_imputed$hc_single)
+cat("Single Linkage Cluster Table:\n")
+print(table_single)
+
+
+table(data_imputed$Genotype, data_imputed$hc_complete)
+table(data_imputed$Treatment, data_imputed$hc_complete)
+table(data_imputed$Behavior, data_imputed$hc_complete)
+
+table(data_imputed$Genotype, data_imputed$hc_average)
+table(data_imputed$Treatment, data_imputed$hc_average)
+table(data_imputed$Behavior, data_imputed$hc_average)
+
+table(data_imputed$Genotype, data_imputed$hc_single)
+table(data_imputed$Treatment, data_imputed$hc_single)
+table(data_imputed$Behavior, data_imputed$hc_single)
+```
+
+```{r}
+table_complete_genotype <- table(data_imputed$Genotype, data_imputed$hc_complete)
+table_complete_treatment <- table(data_imputed$Treatment, data_imputed$hc_complete)
+table_complete_behavior <- table(data_imputed$Behavior, data_imputed$hc_complete)
+
+library(ggplot2)
+library(reshape2)
+
+table_complete_genotype_melt <- melt(table_complete_genotype)
+table_complete_treatment_melt <- melt(table_complete_treatment)
+table_complete_behavior_melt <- melt(table_complete_behavior)
+
+library(gridExtra)
+
+p1 <- ggplot(table_complete_genotype_melt, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile() +
+  geom_text(aes(label = value), color = "black", size = 4) +  
+  scale_fill_gradient(low = "lightblue", high = "red") +
+  labs(title = "Complete Linkage: Genotype", x = "Predicted Clusters", y = "Actual Categories") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  
+
+p2 <- ggplot(table_complete_treatment_melt, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile() +
+  geom_text(aes(label = value), color = "black", size = 4) +  
+  scale_fill_gradient(low = "lightblue", high = "red") +
+  labs(title = "Complete Linkage: Treatment", x = "Predicted Clusters", y = "Actual Categories") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  
+
+p3 <- ggplot(table_complete_behavior_melt, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile() +
+  geom_text(aes(label = value), color = "black", size = 4) +  
+  scale_fill_gradient(low = "lightblue", high = "red") +
+  labs(title = "Complete Linkage: Behavior", x = "Predicted Clusters", y = "Actual Categories") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  
+
+grid.arrange(p1, p2, p3, ncol = 3)
+
+```
+
+```{r}
+library(cluster)
+
+dist_matrix <- dist(X_scaled)
+
+hc_complete <- hclust(dist_matrix, method = "complete")
+
+diss <- daisy(X_scaled, metric = "gower")
+diss.mat <- as.matrix(diss)
+
+diag(diss.mat) <- NA
+
+hist(diss.mat[upper.tri(diss.mat)], 
+     main = "Histogram of Gower's Distance (Euclidean, Complete Linkage)",
+     xlab = "Gower's Distance", 
+     border = "black")
+
+mean_gower_distance <- mean(diss.mat, na.rm = TRUE)
+
+cat("Mean Gower's Distance for Euclidean Complete Linkage: ", mean_gower_distance, "\n")
+```
+
+
+
+### Pearson Correlation
+```{r}
+pca_res <- prcomp(X_scaled)
+X_pca_28 <- pca_res$x[, 1:28] 
+
+cor_matrix <- cor(t(X_pca_28), method = "pearson")
+
+cor_dist <- as.dist(1 - cor_matrix)
+
+hc_pearson_complete <- hclust(cor_dist, method = "complete")
+hc_pearson_average  <- hclust(cor_dist, method = "average")
+hc_pearson_single   <- hclust(cor_dist, method = "single")
+
+cut_pearson_complete <- cutree(hc_pearson_complete, k = 8)
+cut_pearson_average  <- cutree(hc_pearson_average, k = 8)
+cut_pearson_single   <- cutree(hc_pearson_single, k = 8)
+
+pca_df <- as.data.frame(pca_res$x)  
+pca_df$Pearson_Complete <- as.factor(cut_pearson_complete)
+pca_df$Pearson_Average  <- as.factor(cut_pearson_average)
+pca_df$Pearson_Single   <- as.factor(cut_pearson_single)
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Pearson_Complete)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "Hierarchical Clustering (Pearson + Complete, k=8)",
+       x = "PC1", y = "PC2") +
+  theme_minimal()
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Pearson_Average)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "Hierarchical Clustering (Pearson + Average, k=8)",
+       x = "PC1", y = "PC2") +
+  theme_minimal()
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Pearson_Single)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "Hierarchical Clustering (Pearson + Single, k=8)",
+       x = "PC1", y = "PC2") +
+  theme_minimal()
+```
+```{r}
+p1 <- ggplot(pca_df, aes(x = PC1, y = PC2, color = Pearson_Complete)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "Complete Linkage (k=8)",
+       x = "PC1", y = "PC2") +
+  theme_minimal() +
+  theme(legend.position = "none") 
+
+p2 <- ggplot(pca_df, aes(x = PC1, y = PC2, color = Pearson_Average)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "Average Linkage (k=8)",
+       x = "PC1", y = "PC2") +
+  theme_minimal() +
+  theme(legend.position = "none") 
+
+p3 <- ggplot(pca_df, aes(x = PC1, y = PC2, color = Pearson_Single)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "Single Linkage (k=8)",
+       x = "PC1", y = "PC2") +
+  theme_minimal() +
+  theme(legend.position = "right") 
+
+grid.arrange(p1, p2, p3, ncol = 3)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+silhouette_pearson_complete <- silhouette(cut_pearson_complete, dist(X_pca_28))
+silhouette_pearson_average  <- silhouette(cut_pearson_average, dist(X_pca_28))
+silhouette_pearson_single   <- silhouette(cut_pearson_single, dist(X_pca_28))
+
+plot(silhouette_pearson_complete, main = "Silhouette for Pearson + Complete Linkage")
+
+plot(silhouette_pearson_average, main = "Silhouette for Pearson + Average Linkage")
+
+plot(silhouette_pearson_single, main = "Silhouette for Pearson + Single Linkage")
+
+avg_sil_width_complete <- mean(silhouette_pearson_complete[, "sil_width"])
+avg_sil_width_average  <- mean(silhouette_pearson_average[, "sil_width"])
+avg_sil_width_single   <- mean(silhouette_pearson_single[, "sil_width"])
+
+cat("Average Silhouette Width for Pearson + Complete Linkage: ", avg_sil_width_complete, "\n")
+cat("Average Silhouette Width for Pearson + Average Linkage: ", avg_sil_width_average, "\n")
+cat("Average Silhouette Width for Pearson + Single Linkage: ", avg_sil_width_single, "\n")
+
+```
+
+```{r}
+pca_res <- prcomp(X_scaled)
+X_pca_28 <- pca_res$x[, 1:28]  
+
+cor_matrix <- cor(t(X_pca_28), method = "pearson")
+
+cor_dist <- as.dist(1 - cor_matrix)
+
+hc_pearson_complete <- hclust(cor_dist, method = "complete")
+
+cut_pearson_complete <- cutree(hc_pearson_complete, k = 8)
+
+loadings <- pca_res$rotation[, 1:2]  
+
+top_contributors_PC1 <- order(abs(loadings[, 1]), decreasing = TRUE)[1:10]
+
+top_contributors_PC2 <- order(abs(loadings[, 2]), decreasing = TRUE)[1:10]  
+
+top_proteins_PC1 <- rownames(loadings)[top_contributors_PC1]
+top_proteins_PC2 <- rownames(loadings)[top_contributors_PC2]
+
+cat("Top Contributing Proteins for PC1:\n")
+print(top_proteins_PC1)
+
+cat("\nTop Contributing Proteins for PC2:\n")
+print(top_proteins_PC2)
+
+```
+```{r}
+# Perform PCA and select the first 28 principal components
+pca_res <- prcomp(X_scaled)
+X_pca_28 <- pca_res$x[, 1:28]  # Use the first 28 PCs
+
+# Calculate correlation matrix using Pearson correlation
+cor_matrix <- cor(t(X_pca_28), method = "pearson")
+
+# Convert correlation to dissimilarity (distance matrix)
+cor_dist <- as.dist(1 - cor_matrix)
+
+# Perform hierarchical clustering using Complete Linkage with Pearson
+hc_pearson_complete <- hclust(cor_dist, method = "complete")
+
+# Cut the dendrogram into 8 clusters (as we did before)
+cut_pearson_complete <- cutree(hc_pearson_complete, k = 8)
+
+# Now we want to examine the loadings for the top 2 PCs (PC1 and PC2)
+loadings <- pca_res$rotation[, 1:2]  # Get loadings for PC1 and PC2
+
+# For PC1 (first principal component)
+top_contributors_PC1 <- order(abs(loadings[, 1]), decreasing = TRUE)[1:10]  # Top 10 contributors for PC1
+
+# For PC2 (second principal component)
+top_contributors_PC2 <- order(abs(loadings[, 2]), decreasing = TRUE)[1:10]  # Top 10 contributors for PC2
+
+# Get the names of the top contributing proteins for each principal component
+top_proteins_PC1 <- rownames(loadings)[top_contributors_PC1]
+top_proteins_PC2 <- rownames(loadings)[top_contributors_PC2]
+
+# Create a data frame for plotting
+top_proteins <- data.frame(
+  Protein = c(top_proteins_PC1, top_proteins_PC2),
+  PC = rep(c("PC1", "PC2"), each = 10),
+  Loadings = c(loadings[top_contributors_PC1, 1], loadings[top_contributors_PC2, 2])
+)
+
+# Plot the top contributing proteins for both PC1 and PC2
+library(ggplot2)
+
+ggplot(top_proteins, aes(x = reorder(Protein, Loadings), y = Loadings, fill = PC)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +
+  labs(title = "Top Contributing Proteins for PC1 and PC2",
+       x = "Protein",
+       y = "Loading Value",
+       fill = "Principal Component") +
+  theme_minimal()
+
+```
+
+```{r}
+cor_matrix <- cor(t(X_pca_28), method = "pearson")
+
+cor_dist <- as.dist(1 - cor_matrix)
+
+hc_pearson_complete <- hclust(cor_dist, method = "complete")
+
+gower_dist <- daisy(X_scaled, metric = "gower")
+
+gower_matrix <- as.matrix(gower_dist)
+
+hist(gower_matrix[upper.tri(gower_matrix)], main = "Histogram of Gower Distance (Hierarchical Pearson)",
+     xlab = "Gower Distance", border = "black", breaks = 20)
+
+mean_gower <- mean(gower_matrix[upper.tri(gower_matrix)])
+cat("Mean Gower Distance for Hierarchical Clustering (Pearson): ", mean_gower, "\n")
+```
+
+
+# PAM
+```{r}
+X_scaled <- scale(data_imputed[, protein_cols])
+
+sil_width <- c()
+best_k_val <- 0 
+best_k <- 0
+
+for(i in 2:10){
+  pam_fit <- pam(X_scaled, k = i)
+  sil_width[i - 1] <- pam_fit$silinfo$avg.width
+  
+  if (sil_width[i - 1] > best_k_val) {
+    best_k_val <- sil_width[i - 1]
+    best_k <- i
+  }
+}
+
+cat("Best k: ", best_k, " with silhouette width: ", best_k_val, "\n")
+
+plot(2:10, sil_width, type = "b", pch = 19, col = "blue", 
+     xlab = "Number of Clusters (k)", ylab = "Average Silhouette Width", 
+     main = "Silhouette Width for Different k (PAM Clustering)")
+
+```
+### k = 2
+```{r}
+set.seed(123)  
+pam_fit <- pam(X_scaled, k = 2)
+
+data_imputed$PAM_cluster <- as.factor(pam_fit$clustering)
+
+pca_out <- prcomp(X_scaled)  
+pca_df <- as.data.frame(pca_out$x[, 1:2])  
+pca_df$Cluster <- data_imputed$PAM_cluster
+
+library(ggplot2)
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Cluster)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "PCA Colored by PAM Clustering (k=2)", x = "PC1", y = "PC2") +
+  theme_minimal()
+
+table(data_imputed$Genotype, data_imputed$PAM_cluster)
+```
+
+```{r}
+silhouette_pam <- silhouette(pam_fit$clustering, dist(X_scaled))
+
+plot(silhouette_pam, main = "Silhouette Plot for PAM Clustering (k=2)")
+
+```
+```{r}
+table(data_imputed$Treatment, data_imputed$PAM_cluster)
+
+table(data_imputed$Behavior, data_imputed$PAM_cluster)
+
+table(data_imputed$Genotype, data_imputed$PAM_cluster)
+
+```
+```{r}
+conf_matrix_genotype <- table(data_imputed$Genotype, data_imputed$PAM_cluster)
+conf_matrix_genotype_melt <- melt(conf_matrix_genotype)
+
+conf_matrix_treatment <- table(data_imputed$Treatment, data_imputed$PAM_cluster)
+conf_matrix_treatment_melt <- melt(conf_matrix_treatment)
+
+conf_matrix_behavior <- table(data_imputed$Behavior, data_imputed$PAM_cluster)
+conf_matrix_behavior_melt <- melt(conf_matrix_behavior)
+
+heatmap_genotype <- ggplot(conf_matrix_genotype_melt, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile() +
+  geom_text(aes(label = value), color = "black", size = 4) +
+  scale_fill_gradient(low = "lightblue", high = "red") +
+  labs(title = "Confusion Matrix Heatmap for Genotype", x = "Predicted Clusters", y = "Actual Categories") +
+  theme_minimal() +
+  scale_x_discrete(breaks = 1:8, labels = c("1", "2", "3", "4", "5", "6", "7", "8"))  
+
+heatmap_treatment <- ggplot(conf_matrix_treatment_melt, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile() +
+  geom_text(aes(label = value), color = "black", size = 4) +
+  scale_fill_gradient(low = "lightblue", high = "red") +
+  labs(title = "Confusion Matrix Heatmap for Treatment", x = "Predicted Clusters", y = "Actual Categories") +
+  theme_minimal() +
+  scale_x_discrete(breaks = 1:8, labels = c("1", "2", "3", "4", "5", "6", "7", "8"))  
+
+heatmap_behavior <- ggplot(conf_matrix_behavior_melt, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile() +
+  geom_text(aes(label = value), color = "black", size = 4) +
+  scale_fill_gradient(low = "lightblue", high = "red") +
+  labs(title = "Confusion Matrix Heatmap for Behavior", x = "Predicted Clusters", y = "Actual Categories") +
+  theme_minimal() +
+  scale_x_discrete(breaks = 1:8, labels = c("1", "2", "3", "4", "5", "6", "7", "8"))  #
+
+grid.arrange(heatmap_genotype, heatmap_treatment, heatmap_behavior, ncol = 3)
+```
+
+
+```{r}
+pca_out <- prcomp(X_scaled)
+
+
+loadings <- pca_out$rotation[, 1:2] 
+
+top_contributors_PC1 <- order(abs(loadings[, 1]), decreasing = TRUE)[1:10] 
+
+
+top_contributors_PC2 <- order(abs(loadings[, 2]), decreasing = TRUE)[1:10] 
+
+top_proteins_PC1 <- rownames(loadings)[top_contributors_PC1]
+top_proteins_PC2 <- rownames(loadings)[top_contributors_PC2]
+
+top_proteins <- data.frame(
+  Protein = c(top_proteins_PC1, top_proteins_PC2),
+  PC = rep(c("PC1", "PC2"), each = 10),
+  Loadings = c(loadings[top_contributors_PC1, 1], loadings[top_contributors_PC2, 2])
+)
+
+cat("Top Contributing Proteins for PC1:\n")
+print(top_proteins_PC1)
+
+cat("\nTop Contributing Proteins for PC2:\n")
+print(top_proteins_PC2)
+
+ggplot(top_proteins, aes(x = reorder(Protein, Loadings), y = Loadings, fill = PC)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +
+  labs(title = "Top Contributing Proteins for PC1 and PC2 in PAM Clustering",
+       x = "Protein",
+       y = "Loading Value",
+       fill = "Principal Component") +
+  theme_minimal()
+```
+
+
+
+```{r}
+gower_dist <- daisy(X_scaled, metric = "gower")
+
+gower_dist_mat <- as.matrix(gower_dist)
+
+diag(gower_dist_mat) <- NA
+
+hist(gower_dist_mat[upper.tri(gower_dist_mat)], 
+     main = "Histogram of Gower's Distance",
+     xlab = "Gower's Distance",
+     border = "black", 
+     breaks = 20)
+
+mean_gower_dist <- mean(gower_dist_mat[upper.tri(gower_dist_mat)], na.rm = TRUE)
+
+cat("Mean Gower's Distance:", mean_gower_dist, "\n")
+```
+
+
+
+### k = 8
+```{r}
+set.seed(123)  
+pam_fit <- pam(X_scaled, k = 8)
+
+data_imputed$PAM_cluster <- as.factor(pam_fit$clustering)
+
+pca_out <- prcomp(X_scaled)
+pca_df <- as.data.frame(pca_out$x[, 1:2]) 
+pca_df$Cluster <- data_imputed$PAM_cluster
+
+library(ggplot2)
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Cluster)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "PCA Colored by PAM Clustering (k=8)", x = "PC1", y = "PC2") +
+  theme_minimal()
+
+table(data_imputed$Genotype, data_imputed$PAM_cluster)
+```
+
+
+```{r}
+silhouette_pam <- silhouette(pam_fit$clustering, dist(X_scaled))
+
+plot(silhouette_pam, main = "Silhouette Plot for PAM Clustering (k=8)")
+
+```
+
+```{r}
+genotype_table <- table(data_imputed$Genotype, data_imputed$PAM_cluster)
+print(genotype_table)
+
+treatment_table <- table(data_imputed$Treatment, data_imputed$PAM_cluster)
+print(treatment_table)
+
+behavior_table <- table(data_imputed$Behavior, data_imputed$PAM_cluster)
+print(behavior_table)
+
+```
+
+
+
+
+
